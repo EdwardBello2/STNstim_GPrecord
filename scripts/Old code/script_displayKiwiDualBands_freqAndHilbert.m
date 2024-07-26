@@ -1,0 +1,414 @@
+% script to mess with hilbert shenanigans in Kiwi's data, based on
+% "script_kiwiTremor_PSDs.m"
+
+% Collected on microstrain G-link hardware
+clear; close all
+
+% INPUTS
+
+projRootPath = 'L:\My Drive\PROJECTS\Thalamic DBS for Harmaline Tremors\';
+
+% for loading
+dataAcqPn = 'D:\PROJECTS\Thalamic DBS for Harmaline Tremors\Data Acquisition\';
+directoryPn = 'Kiwi\KiwiExperiment_05_17_2016\';
+inputMetaData = 'RecordingsMetadata_selectDisplay.mat';
+
+% for saving
+SavePn = 'Data Processing\Kiwi_tremors\';
+
+% recTimes = xlsread([projRootPath 'Data Acquisition\Kiwi Experiment\' 'RecordingsMetadata' '.xlsx'], ...
+%     'B2:B34');
+% a = datetime(recTimes, 'convertfrom', 'excel');
+% a.Format = 'HH:mm:ss'
+
+% T = readtable([projRootPath 'Data Acquisition\Kiwi Experiment\' 'RecordingsMetadata']);
+
+% recBegT = datetime(T.recBeginText);
+% harTime = datetime('12:13:00', 'InputFormat', 'HH:mm:ss'); 
+% harRefTime = recBegT - harTime;
+
+% Get sub-selection of table that I want to show...
+% Tselect = T(4:end,:);
+
+
+% CONSTANTS
+
+% Downsampling high sampling frequency files from ~8kHz down to ~512 Hz, to
+% be near in sampling frequency to the 500 Hz sampling frequency files:
+DWNFACTOR = 16;
+
+% Spectrogram parameters:
+TWIN = 1; % seconds, sliding time-window of spectrogram
+NOVERLAP = 0; % samples, no overlaps for these spectrogam windows
+
+
+
+%% Load file 
+
+% pre-load the metadata table with file info
+load([projRootPath 'Data Acquisition\Kiwi Experiment\' inputMetaData], 'Tselect');
+
+
+
+%% Loop thru all individual files adding values to table
+
+nRows = height(Tselect);
+tic
+for iRow = 1:nRows
+    % Load in data and get into format of "acc" and "fs"
+    fn = Tselect.filename{iRow};
+    load([projRootPath 'Data Acquisition\Kiwi Experiment\' fn], ...
+        'data', 'time', 'sampling_frequency', 'output_signal');
+
+
+    % if it's a stim recording, the first channel will be a recording of TACS
+    % or DBS signal, for a total of 4 channels; otherwise there should just be
+    % 3 channels of accel
+    if size(data, 2) == 4 
+        acc = data(:,2:4);
+
+    else
+        acc = data(:,1:3);
+
+    end
+    t = time;
+    fs = sampling_frequency;
+
+    % Detrend data, linear best fit is subtracted from each channel
+    acc = detrend(acc);
+
+
+    % Highpass filter out slow components
+    fc = 1; % Hz
+    [b,a] = butter(3, fc/(fs/2), 'high');
+    accFilt = filtfilt(b, a, acc);
+
+    % Because of stupidity I recorded things at two different sampling
+    % frequencies. Now, PSD peak amplitudes are significantly affected by 
+    % sampling frequency, so to properly compare data recorded with
+    % different fs we need to downsample the faster one to get as close to
+    % the slower as possible. 
+
+    % two frequencies used: 500 Hz, 8,193.4 Hz
+    if fs > 500
+    %     DWNFACTOR = 16;
+        fs = fs/DWNFACTOR; % bring down to 512.0852
+        t = downsample(t, DWNFACTOR);
+        clear y
+        for i = 1:3
+            y(:,i) = decimate(accFilt(:,i), DWNFACTOR);
+
+        end
+        accFilt = y;
+
+    else
+    %     dTime = t;
+    end
+
+    % figure; plot(t, accFilt)
+    % title('highpassed')
+
+
+
+    %% Get combined triaxial spectrogram
+
+    window = floor(TWIN * fs);
+
+    % Sum PSDs from all 3 accel channels
+    clear Z S
+    for ch = 1:3
+        [Z(:,:,ch), f, tSpec] = spectrogram(accFilt(:,ch), window, NOVERLAP, [], fs, 'yaxis');
+        % tRef = linspace(tSpec(1), tSpec(end), numel(tSpec));
+        S(:,:,ch) = abs(Z(:,:,ch));
+        S(:,:,ch) = S(:,:,ch).^2;
+
+    end
+    % Combine spectral power from all three axes (summate)
+    Sacc = sum(S, 3);
+
+%     % Get average power (S) PSD over time
+%     % PSDWashNorm = Swash ./ (repmat(PSDbaseAv, 1, size(Swash, 2)));
+%     f2 = figure; 
+%     ax = axes;
+%     ax.Parent = f2;
+%     surf(tSpec, f, 10*log10(Sacc), ...
+%         'Parent', ax, ...
+%         'EdgeColor', 'none');
+%     hold(ax, 'on');
+%     % xlabel('Time (min)');
+%     grid on
+%     axis(ax, 'tight')
+%     view(0,90)
+%     colorbar
+%     % ax.CLim = [-9, 9];
+%     % ax.YLim = [0, 20];
+%     % title([titStr, ', Washin, dBgain (Washin/Naive)'])
+
+
+
+    %% Identify movement artifact windows in spectrogram
+
+    [~, isMovArt] = util.remoutliers(sum(Sacc, 1), ...
+        'bound', 'upper', ...
+        'MADthresh', 3);
+    temp = Sacc;
+    temp(:,isMovArt) = [];
+    SaccMarkOutliers = Sacc;
+    SaccMarkOutliers(:,isMovArt) = 100;
+
+
+    % % Show Spectrogram with detected movement artifacts marked as 100's values
+    % f4 = figure;
+    % ax4 = axes;
+    % ax4.Parent = f4;
+    % surf(tSpec, f, 10*log10(SaccMarkOutliers), ...
+    %     'Parent', ax4, ...
+    %     'EdgeColor', 'none');
+    % hold(ax4, 'on');
+    % xlabel('Time (min)');
+    % grid on
+    % axis(ax4, 'tight')
+    % view(0,90)
+    % colorbar
+    % % ax4.YLim = [0, 300];
+    % % ax4.CLim = [-80, -30];
+    % title('Mov Artifacts marked');
+    % ylabel('Frequency (Hz)');
+    % f4.Position = [2555 57 560 421];
+    % 
+    % 
+    % % Show Spectrogram with movement artifacts removed totally
+    % f4 = figure;
+    % ax4 = axes;
+    % ax4.Parent = f4;
+    % tset = t;
+    % tset(isMovArt) = [];
+    % surf(1:size(temp, 2), f, 10*log10(temp), ...
+    %     'Parent', ax4, ...
+    %     'EdgeColor', 'none');
+    % hold(ax4, 'on');
+    % xlabel('samples');
+    % grid on
+    % axis(ax4, 'tight')
+    % view(0,90)
+    % colorbar
+    % ax4.YLim = [0, 150];
+    % % ax4.CLim = [-80, -30];
+    % title('Mov Artifacts removed')
+    % ylabel('Frequency (Hz)');
+    % f4.Position = [2554 566 560 420];
+
+
+    % Get average PSD free of movement artifact windows
+    Sclean = temp; % movement artifact windows removed
+    PSD = mean(Sclean, 2);
+    % 
+    % f1 = figure; ax = axes;
+    % plot(f, (PSD));
+    % grid on; 
+    % ax.XLim = [0, 35];
+    % ax.YLim = [0, popMaxPSD];
+    % xlabel('Frequency (Hz)');
+    % title(['Minutes since harmaline inject: ' num2str(minutes(Tselect.harRefTime(iRow)))], 'Interpreter', 'none')
+
+
+
+    %% Split time-series data into two bands
+
+    % binsPerDecade = 2;
+    % nBins = 40;
+    % binEdgeLeft = 10^(0);
+    % binEdges = binEdgeLeft*10.^((0:nBins)/binsPerDecade)
+
+    fcLo = [3.1623, 10]; % Hz
+    fcHi = [10, 31.6228]; % Hz 
+
+    % Low band: 
+    [b, a] = butter(2, fcLo / (fs/2), 'bandpass');
+    accLo = filtfilt(b, a, accFilt);
+
+    % High band:
+    [b, a] = butter(2, fcHi / (fs/2), 'bandpass');
+    accHi = filtfilt(b, a, accFilt);
+
+
+
+    %% Get PSD estimates for both bands as above
+
+    % LOW-BAND
+    window = floor(TWIN * fs);
+    clear Z S
+    for ch = 1:3
+        [Z(:,:,ch), f, tSpec] = spectrogram(accLo(:,ch), window, NOVERLAP, [], fs, 'yaxis');
+        % tRef = linspace(tSpec(1), tSpec(end), numel(tSpec));
+        S(:,:,ch) = abs(Z(:,:,ch));
+        S(:,:,ch) = S(:,:,ch).^2;
+
+    end
+    SaccLo = sum(S, 3);
+    SaccLoClean = SaccLo;
+    SaccLoClean(:,isMovArt) = [];
+    PSDlo = mean(SaccLoClean, 2);
+    % figure; plot(f, 10*log10(PSDlo));
+
+
+    % HIGH-BAND
+    window = floor(TWIN * fs);
+    clear Z S
+    for ch = 1:3
+        [Z(:,:,ch), f, tSpec] = spectrogram(accHi(:,ch), window, NOVERLAP, [], fs, 'yaxis');
+        % tRef = linspace(tSpec(1), tSpec(end), numel(tSpec));
+        S(:,:,ch) = abs(Z(:,:,ch));
+        S(:,:,ch) = S(:,:,ch).^2;
+
+    end
+    SaccHi = sum(S, 3);
+    SaccHiClean = SaccHi;
+    SaccHiClean(:,isMovArt) = [];
+    PSDhi = mean(SaccHiClean, 2);
+    % figure; plot(f, 10*log10(PSDhi));
+    tSpec = tSpec';
+
+    % TRACK peak frequency results for table
+    fPeakLo(iRow,1) = f(PSDlo == max(PSDlo));
+    fPeakHi(iRow,1) = f(PSDhi == max(PSDhi));
+    
+    % TRACK PSD peak amplitudes for each band too
+    aPeakLo(iRow,1) = max(PSDlo);
+    aPeakHi(iRow,1) = max(PSDhi);
+
+
+
+    %% Get hilbert instantaneous band power for lo and hi
+
+    accLoMag = abs(hilbert(accLo));
+    % accLoPha = angle(hilbert(accLo));
+    accHiMag = abs(hilbert(accHi)); 
+    % accHiPha = angle(hilbert(accHi)); 
+
+
+
+    %% Remove data points pertaining to movment artifact time windows, detected
+    % from the Spectrogram work...
+
+    accLoMagSum = sum(accLoMag, 2);
+    accHiMagSum = sum(accHiMag, 2);
+
+    % Go from known mov artifact specgram time windows to labeling time-series
+    % indices to exclude from final analysis:
+
+    % specify m x n matrix to track which time-series samples to mark. m:
+    % samples in time-series; n: number of spectrogram windows detected as mov
+    % artifact
+
+    nArts = sum(isMovArt);
+    idxArt = find(isMovArt);
+    artWinIdx = false(length(accLoMag), sum(isMovArt));
+
+    for iArt = 1:nArts
+        % specgram window time represents center of window
+        i_timeArt = tSpec(idxArt(iArt));
+        i_timeRange = [(i_timeArt - TWIN/2), (i_timeArt + TWIN/2)];
+
+        % the values of time-series time that fall within this range will be
+        % marked as artifact sample indices
+        artWinIdx(:,iArt) = (t >= i_timeRange(1)) & (t < i_timeRange(2));
+
+    end
+    % Collapse all detected mov artifact indices to 1D to mark the samples in
+    % time-series that need to be ignored
+    isMovArtTimeSeries = any(artWinIdx, 2);
+
+    % figure; plot(accLoMagSum); hold on; plot(isMovArtTimeSeries);
+    % figure; plot(accHiMagSum); hold on; plot(isMovArtTimeSeries);
+
+    % Remove values that fall within movement artifact time
+    accLoMagSum(isMovArtTimeSeries) = [];
+    accHiMagSum(isMovArtTimeSeries) = [];
+
+
+
+    %% Get average Power for each band, and TRACK
+
+    % Mean Power for total time
+    avLoMag(iRow,1) = mean(accLoMagSum);
+    avHiMag(iRow,1) = mean(accHiMagSum);
+
+    % Cross-correlation for 
+    x = accLoMagSum;
+    y = accHiMagSum;
+
+    [r, p] = corrcoef(x, y);
+    R(iRow,1) = r(2);
+
+    x_boot = x;
+
+
+    % get p-test based on this empirical bootstrapp'd distribution
+    nBoots = 1000;
+    nSamps = length(x);
+    r_boot = zeros(nBoots, 1);
+    for iBoot = 1:nBoots
+        x_boot = circshift(x, randi(nSamps));
+        rtemp = corrcoef(x_boot, y);
+        r_boot(iBoot) = rtemp(2);
+
+    end
+    Pc(iRow,1) = sum(r_boot > R(iRow,1)) / numel(r_boot);
+
+    % figure; plot(x); hold on; plot(y); 
+    % title(['Pearson R: ' num2str(R) ', p = ' num2str(Pc)]); 
+    % legend('low band', 'high band')
+    
+    
+end
+toc
+Tdisp = Tselect;
+
+Tdisp = [Tdisp, table(fPeakLo), table(aPeakLo), table(avLoMag), ...
+    table(fPeakHi), table(aPeakHi), table(avHiMag), table(R), table(Pc)];
+
+
+
+%% Display Peak frequency over time
+
+tSinceHar = minutes(Tdisp.harRefTime(:)); % minutes
+
+figure;
+% For the low band:
+subplot(2,4,1); plot(tSinceHar, Tdisp.fPeakLo, '-o'); 
+xlabel('Time since injection (mins)'); ylabel('Frequency (Hz)'); 
+title('Low band peak frequency (PSD)'); grid on
+
+subplot(2,4,2); stem(tSinceHar, Tdisp.aPeakLo);
+xlabel('Time since injection (mins)'); ylabel('Power, A.U.'); 
+title('Low band peak Power (avPSD)'); grid on
+ax = gca; ax.YLim(2) = 40;
+
+subplot(2,4,3); stem(tSinceHar, Tdisp.avLoMag);
+xlabel('Time since injection (mins)'); ylabel('Power, A.U.'); 
+title('Low band peak Power (avHilbert)'); grid on
+ax = gca; ax.YLim(2) = 0.1;
+
+subplot(2,4,4); stem(tSinceHar, Tdisp.R);
+xlabel('Time since injection (mins)'); ylabel('Pearsons R'); 
+title('low-high band correlation'); grid on
+
+
+% For the high band: 
+subplot(2,4,5); plot(tSinceHar, Tdisp.fPeakHi, '-o'); 
+xlabel('Time since injection (mins)'); ylabel('Frequency (Hz)'); 
+title('High band peak frequency (PSD)'); grid on
+
+subplot(2,4,6); stem(tSinceHar, Tdisp.aPeakHi);
+xlabel('Time since injection (mins)'); ylabel('Power, A.U.'); 
+title('High band peak Power (avPSD)'); grid on
+ax = gca; ax.YLim(2) = 40;
+
+subplot(2,4,7); stem(tSinceHar, Tdisp.avHiMag);
+xlabel('Time since injection (mins)'); ylabel('Power, A.U.'); 
+title('High band peak Power (avHilbert)'); grid on
+ax = gca; ax.YLim(2) = 0.1;
+
+
+
